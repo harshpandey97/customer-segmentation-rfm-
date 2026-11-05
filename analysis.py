@@ -1,31 +1,18 @@
 """
 Customer Segmentation using RFM + K-Means Clustering
-Author: Harsh Pandey
 
-Goal:
-    Segment customers into actionable groups based on Recency, Frequency,
-    and Monetary (RFM) value using K-Means clustering, then recommend
-    targeted marketing actions per segment.
-
-Run:
-    pip install pandas matplotlib scikit-learn
-    python analysis.py
+Run from any working directory with: python analysis.py
 """
+from pathlib import Path
 
-import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
+import pandas as pd
 from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
-DATA_PATH = "data/customer_rfm.csv"
-
-SEGMENT_LABELS = {
-    0: "Active/Engaged",
-    1: "At-Risk",
-    2: "High-Value/VIP",
-    3: "Frequent Buyers",
-}
-
+ROOT = Path(__file__).resolve().parent
+DATA_PATH = ROOT / "customer_rfm.csv"
+FEATURES = ["Recency", "Frequency", "Monetary"]
 SEGMENT_COLORS = {
     "Active/Engaged": "#2563eb",
     "At-Risk": "#dc2626",
@@ -34,76 +21,101 @@ SEGMENT_COLORS = {
 }
 
 
-def load_data(path: str = DATA_PATH) -> pd.DataFrame:
-    return pd.read_csv(path)
-
-
-def find_optimal_k(scaled_features, max_k: int = 8) -> None:
-    inertias = []
-    for k in range(1, max_k + 1):
-        km = KMeans(n_clusters=k, random_state=42, n_init=10).fit(scaled_features)
-        inertias.append(km.inertia_)
-
-    plt.figure(figsize=(6, 4.5))
-    plt.plot(range(1, max_k + 1), inertias, marker="o", color="#2563eb")
-    plt.title("Elbow Method for Optimal K")
-    plt.xlabel("Number of Clusters (k)")
-    plt.ylabel("Inertia")
-    plt.tight_layout()
-    plt.savefig("elbow_method.png", dpi=130)
-    plt.close()
-
-
-def run_clustering(df: pd.DataFrame, k: int = 4) -> pd.DataFrame:
-    features = df[["Recency", "Frequency", "Monetary"]]
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(features)
-
-    find_optimal_k(scaled)
-
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    df["Cluster"] = kmeans.fit_predict(scaled)
-    df["Segment"] = df["Cluster"].map(SEGMENT_LABELS)
+def load_data(path: str | Path = DATA_PATH) -> pd.DataFrame:
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"RFM dataset not found: {path}")
+    df = pd.read_csv(path)
+    missing = [column for column in FEATURES if column not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing required columns: {', '.join(missing)}")
+    df = df.copy()
+    for column in FEATURES:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    if df[FEATURES].isna().any().any():
+        raise ValueError("RFM features contain missing or non-numeric values")
+    if (df[FEATURES] < 0).any().any():
+        raise ValueError("RFM features cannot contain negative values")
+    if df.empty:
+        raise ValueError("RFM dataset contains no customers")
     return df
 
 
-def plot_segments(df: pd.DataFrame) -> None:
-    plt.figure(figsize=(7.5, 5))
-    for seg, color in SEGMENT_COLORS.items():
-        sub = df[df["Segment"] == seg]
-        plt.scatter(sub["Recency"], sub["Monetary"], label=seg, color=color, alpha=0.6, s=30)
-    plt.title("Customer Segments: Recency vs Monetary Value")
-    plt.xlabel("Recency (days since last purchase)")
-    plt.ylabel("Monetary Value ($)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("segments_scatter.png", dpi=130)
-    plt.close()
+def find_optimal_k(scaled_features, max_k: int = 8) -> None:
+    max_k = min(max_k, len(scaled_features))
+    if max_k < 1:
+        raise ValueError("At least one customer is required")
+    inertias = []
+    for k in range(1, max_k + 1):
+        model = KMeans(n_clusters=k, random_state=42, n_init=10)
+        model.fit(scaled_features)
+        inertias.append(model.inertia_)
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.plot(range(1, max_k + 1), inertias, marker="o", color="#2563eb")
+    ax.set(title="Elbow Method for Optimal K", xlabel="Number of Clusters (k)", ylabel="Inertia")
+    fig.tight_layout()
+    fig.savefig(ROOT / "elbow_method.png", dpi=130)
+    plt.close(fig)
 
-    seg_counts = df["Segment"].value_counts()
-    plt.figure(figsize=(7, 4.5))
-    seg_counts.plot(kind="bar", color=[SEGMENT_COLORS[s] for s in seg_counts.index])
-    plt.title("Customer Count by Segment")
-    plt.ylabel("Number of Customers")
-    plt.tight_layout()
-    plt.savefig("segment_sizes.png", dpi=130)
-    plt.close()
+
+def run_clustering(df: pd.DataFrame, k: int = 4) -> pd.DataFrame:
+    if not 1 <= k <= len(df):
+        raise ValueError(f"k must be between 1 and the number of customers ({len(df)})")
+    result = df.copy()
+    scaled = StandardScaler().fit_transform(result[FEATURES])
+    if len(result) > 1:
+        find_optimal_k(scaled)
+    result["Cluster"] = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(scaled)
+
+    # Cluster IDs are arbitrary; assign stable business labels from each cluster's
+    # RFM profile rather than assuming a particular K-Means label ordering.
+    profile = result.groupby("Cluster")[FEATURES].mean()
+    labels = {}
+    if k == 4:
+        ranked = profile.sort_values(["Monetary", "Frequency"], ascending=False).index.tolist()
+        labels[ranked[0]] = "High-Value/VIP"
+        labels[ranked[1]] = "Frequent Buyers"
+        labels[ranked[2]] = "Active/Engaged"
+        labels[ranked[3]] = "At-Risk"
+    else:
+        labels = {cluster: f"Segment {i + 1}" for i, cluster in enumerate(profile.index)}
+    result["Segment"] = result["Cluster"].map(labels)
+    return result
+
+
+def plot_segments(df: pd.DataFrame) -> None:
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for segment, subset in df.groupby("Segment"):
+        ax.scatter(
+            subset["Recency"], subset["Monetary"],
+            label=segment, color=SEGMENT_COLORS.get(segment, "#64748b"), alpha=0.6, s=30,
+        )
+    ax.set(title="Customer Segments: Recency vs Monetary Value",
+           xlabel="Recency (days since last purchase)", ylabel="Monetary Value")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(ROOT / "segments_scatter.png", dpi=130)
+    plt.close(fig)
+
+    counts = df["Segment"].value_counts()
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    counts.plot(kind="bar", color=[SEGMENT_COLORS.get(s, "#64748b") for s in counts.index], ax=ax)
+    ax.set(title="Customer Count by Segment", ylabel="Number of Customers")
+    fig.tight_layout()
+    fig.savefig(ROOT / "segment_sizes.png", dpi=130)
+    plt.close(fig)
 
 
 def main() -> None:
-    df = load_data()
-    df = run_clustering(df, k=4)
+    df = run_clustering(load_data(), k=4)
     plot_segments(df)
-
-    summary = df.groupby("Segment")[["Recency", "Frequency", "Monetary"]].mean().round(1)
+    summary = df.groupby("Segment")[FEATURES].mean().round(1)
     summary["Count"] = df["Segment"].value_counts()
     print("=== Segment Summary (Average RFM) ===")
     print(summary)
-
-    df.to_csv("data/customer_rfm_segmented.csv", index=False)
-    summary.to_csv("cluster_summary.csv")
-    print("\nSaved: data/customer_rfm_segmented.csv, cluster_summary.csv")
-    print("Charts saved: elbow_method.png, segments_scatter.png, segment_sizes.png")
+    df.to_csv(ROOT / "customer_rfm_segmented.csv", index=False)
+    summary.to_csv(ROOT / "cluster_summary.csv")
+    print("Saved segmented data, summary, and charts in", ROOT)
 
 
 if __name__ == "__main__":
